@@ -9,6 +9,7 @@
     [clojure.string :as str]
     [co.multiply.quiescent :as q]
     [co.multiply.remontoire.exception :as exception]
+    [co.multiply.remontoire.history :as history]
     [co.multiply.remontoire.outline :as outline]
     [co.multiply.remontoire.registry :as registry]
     [co.multiply.remontoire.session :as session]
@@ -133,6 +134,64 @@
         (exception/profile (q/get-ex task)
           (some-> (:baseline (registry/entry id)) deref)))
       (str "Entry " id " is " (name (registry/status task))))))
+
+
+(defn nrepl-history
+  "Recent nREPL transcript summaries, newest first; not MCP registry entries.
+   Capture is optional and must be installed and enabled by the host.
+
+   Options: :limit (default 20, capped at 200), :session (nREPL session id),
+   :status (:running, :done, :failed, :interrupted, :unknown), :since (inclusive
+   epoch milliseconds), :before (exclusive history id, for pagination).
+
+   Returns {:capture {...settings, usage, loss counters...} :entries [...]}.
+   Summaries omit input/output; use `nrepl-transcript` for those. All captured
+   nREPL sessions in this JVM are visible. If 'my last command' is ambiguous,
+   ask which session rather than guessing. Inspect loss markers before drawing
+   conclusions from missing evidence. Reads do not refresh retention."
+  ([] (history/recent))
+  ([opts] (history/recent opts)))
+
+
+(defn nrepl-transcript
+  "Read one nREPL history id, NOT an MCP eval id. Returns request metadata,
+   :input, :status and ordered :events (printed :value, :out, :err, error
+   fields and status strings), or {:id id :missing reason}.
+
+   Text only — no live values to deref, compose, cancel, or replay. Running
+   entries carry partial output. :truncated?, :incomplete? and :capture-gaps?
+   warn of missing evidence; :unknown status means completion is uncertain.
+   Strings are what nREPL emitted, subject to its own printer settings and our
+   caps. Unattributed background JVM output is not part of this transcript."
+  [id]
+  (history/transcript id))
+
+
+(defn nrepl-capture!
+  "With no args, report nREPL recording settings, usage and loss counters.
+   With a map, merge settings: :enabled? (default false), :max-entries (200),
+   :entry-bytes (65536), :total-bytes (8388608). Requires optional middleware
+   `co.multiply.remontoire.nrepl/wrap-history` in the host's nREPL stack.
+
+   Pause/resume with {:enabled? false/true}. Pausing keeps history, but marks
+   in-flight transcripts incomplete; resuming cannot recover missed messages.
+   Limits count UTF-8 text plus fixed bookkeeping allowances, not exact heap
+   bytes. Oldest entries, even running ones, may be evicted. Lowering an entry
+   limit evicts through the newest oversized entry. Capture never waits for a
+   reader or another writer; contention/failures increase :capture-gaps.
+
+   All trusted agents can read captured inputs/results, including secrets.
+   Enable only deliberately; there is no automatic redaction."
+  ([] (history/status))
+  ([opts] (history/configure! opts)))
+
+
+(defn clear-nrepl-history!
+  "Delete retained nREPL history without changing recording settings. Late
+   responses cannot restore it and ids aren't reused. Loss counters remain
+   cumulative. Cannot retract copies already read by an agent."
+  []
+  (history/clear!))
 
 
 (defn sessions

@@ -101,6 +101,31 @@ plain data — `vars` scored, best hits first — so a large result is a collect
 cleanup, deadlines, partial results, integrations, work that outlives its eval, bounded fan-out, repeating work — are
 loaded pattern namespaces: `(__r/nses "patterns")` is the index, `outline` and `file` read them.
 
+## Editor nREPL history
+
+When the host installs `co.multiply.remontoire.nrepl/wrap-history` and explicitly enables recording, the toolkit can
+read recent editor evaluations as well as MCP work. `(__r/nrepl-history)` returns newest-first summaries and capture
+settings/loss counters; filter by `:session`, `:status`, `:since` (epoch milliseconds), or paginate with `:before`
+(history id). `(__r/nrepl-transcript id)` reads the input and ordered response events for one history id, including
+printed values, stdout/stderr and available errors. Running entries contain partial output. Ask which nREPL session
+belongs to the human if several could match; do not silently guess what "my last command" means.
+
+These are **transcripts, not task-registry entries**. Their ids cannot be passed to `res`, `out`, `failure`, or cancel.
+No original result objects are retained; strings reflect nREPL's own printing, without a second realization or print.
+Only JVM Clojure `eval` and `load-file` requests become entries. Other editor operations are ignored, but unmarked
+automated evals may still appear. Output not sent through a request's nREPL transport is outside this history.
+
+Read `:truncated?`, `:incomplete?`, `:capture-gaps?`, and the listing's `:capture` information before drawing conclusions
+from absent evidence. Completion can be `:unknown` after a capture gap or pause. Retention is bounded and oldest-first,
+even for running requests: unlike MCP work, history has no unread-result protection and reading does not refresh it.
+Missing ids report why. This is best-effort history, not an audit log, and cannot recover commands before recording.
+
+`(__r/nrepl-capture!)` reports configuration and loss information. Its map arity changes settings, including
+`{:enabled? false}` to pause or `{:enabled? true}` to resume. `(__r/clear-nrepl-history!)` clears retained content without
+changing recording settings. Do not enable recording or clear the human's history without their authorization.
+All trusted agents on this instance can read captured inputs and outputs, including secrets; there is no automatic
+redaction. Clearing cannot retract copies already read. No nREPL history is automatically added to MCP responses.
+
 ## Sharing the JVM
 
 One JVM, one system: the registry is shared across every connected session — `(__r/evals)` lists everything, `:by`
