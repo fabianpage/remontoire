@@ -7,7 +7,9 @@
     [co.multiply.remontoire.nrepl :as recorder]
     [nrepl.core :as nrepl]
     [nrepl.server :as server]
-    [nrepl.transport :as transport]))
+    [nrepl.transport :as transport])
+  (:import
+    (java.util.concurrent.locks ReentrantLock)))
 
 
 (use-fixtures :each isolated-history)
@@ -152,9 +154,38 @@
         (is (= :running (:status (latest))))
         (is (= ["working\n"] (vec (keep :out (:events (latest)))))))
       (request client session {:op "interrupt" :interrupt-id "waiting"})
-      (is (= :interrupted (:status (latest))))
-      (is (= "waiting" (:request-id (latest))))
+      (let [recorded (latest)]
+        ;; Interrupt and error responses can race for the non-blocking recorder.
+        (is (contains? #{:interrupted :unknown} (:status recorded)))
+        (when (= :unknown (:status recorded))
+          (is (:capture-gaps? recorded)))
+        (is (= "waiting" (:request-id recorded))))
       (is (= 1 (count (:entries (api/nrepl-history))))))))
+
+
+(deftest interrupt-contention-reports-loss-without-blocking-the-client
+  (with-server
+    (fn [client session connection]
+      (transport/send connection {:op "eval" :id "waiting" :session session
+                                  :code "(do (println \"working\") (flush) (Thread/sleep 30000))"})
+      (is (= "working\n" (:out (transport/recv connection 5000))))
+      (let [id (:id (latest))
+            gaps (:capture-gaps (api/nrepl-capture!))
+            writer @#'history/writer]
+        ;; The server must deliver the interrupt while this thread holds the
+        ;; capture lock. No sleeps or scheduler luck are needed to force loss.
+        (ReentrantLock/.lock writer)
+        (try
+          (let [responses (request client session {:op "interrupt" :interrupt-id "waiting"})
+                recorded (api/nrepl-transcript id)]
+            (is (= #{"done"} (set (mapcat :status responses))))
+            (is (= :unknown (:status recorded)))
+            (is (:capture-gaps? recorded))
+            (is (> (:capture-gaps (api/nrepl-capture!)) gaps))
+            (is (= "waiting" (:request-id recorded)))
+            (is (= session (:session recorded)))
+            (is (= ["working\n"] (vec (keep :out (:events recorded))))))
+          (finally (ReentrantLock/.unlock writer)))))))
 
 
 (deftest failing-recorder-does-not-affect-the-real-client

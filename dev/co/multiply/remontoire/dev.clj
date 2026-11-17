@@ -5,16 +5,16 @@
    `:dev` alias and never in the jar."
   (:require
     [co.multiply.remontoire :as remontoire]
-    [nrepl.cmdline :as nrepl]
-    [clojure.core :as c]
-    [co.multiply.remontoire.api :as __r]))
+    [co.multiply.remontoire.api :as r]
+    [nrepl.cmdline :as nrepl]))
 
-(c/comment
+
+(comment
   (require '[clojure.tools.namespace.repl :as tn])
   (tn/refresh)
-  (__r/nses "co.multiply.remontoire")
-  (__r/outline 'co.multiply.remontoire.evaluate)
-  (co.multiply.remontoire.api/nrepl-capture! {:enabled? true}))
+  (r/nses "co.multiply.remontoire")
+  (r/outline 'co.multiply.remontoire.evaluate)
+  (r/nrepl-capture! {:enabled? true}))
 
 
 (defn -main
