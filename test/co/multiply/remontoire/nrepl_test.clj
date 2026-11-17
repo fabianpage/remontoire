@@ -1,5 +1,6 @@
 (ns co.multiply.remontoire.nrepl-test
   (:require
+    [clojure.string :as str]
     [clojure.test :refer [deftest is use-fixtures]]
     [co.multiply.remontoire.api :as api]
     [co.multiply.remontoire.history :as history]
@@ -7,9 +8,7 @@
     [co.multiply.remontoire.nrepl :as recorder]
     [nrepl.core :as nrepl]
     [nrepl.server :as server]
-    [nrepl.transport :as transport])
-  (:import
-    (java.util.concurrent.locks ReentrantLock)))
+    [nrepl.transport :as transport]))
 
 
 (use-fixtures :each isolated-history)
@@ -33,22 +32,23 @@
 
 (defn- latest
   []
-  (some-> (api/nrepl-history {:limit 1}) :entries first :id api/nrepl-transcript))
+  (some-> (api/nrepl-history) :entries first :id api/nrepl-transcript))
 
 
-(deftest real-stack-preserves-client-output-and-captures-printed-values
+(deftest real-stack-preserves-client-output-and-captures-printed-text
   (with-server
     (fn [client session _]
       (let [code "(println \"out\") (binding [*out* *err*] (println \"err\")) (+ 1 2)"
             responses (request client session {:op "eval" :id "human-eval" :code code})
             recorded (latest)]
-        (is (= :done (:status recorded)))
         (is (= session (:session recorded)))
         (is (= "human-eval" (:request-id recorded)))
         (is (= code (:input recorded)))
-        (doseq [key [:value :out :err]]
-          (is (= (vec (keep key responses)) (vec (keep key (:events recorded))))))
-        (is (= "3" (last (keep :value (:events recorded)))))))))
+        (is (= "3" (last (keep :value responses))))
+        (doseq [key [:value :out :err]
+                text (keep key responses)]
+          (is (str/includes? (:output recorded) text)))
+        (is (not-any? (set (keys recorded)) [:status :events]))))))
 
 
 (def printer-calls (atom 0))
@@ -69,14 +69,14 @@
                            :nrepl.middleware.print/print
                            "co.multiply.remontoire.nrepl-test/counting-printer"})]
           (is (= 1 @printer-calls))
-          (is (= ["custom-printed-value"] (vec (keep :value responses))
-                (vec (keep :value (:events (latest)))))))))))
+          (is (= ["custom-printed-value"] (vec (keep :value responses))))
+          (is (str/includes? (:output (latest)) "custom-printed-value")))))))
 
 
 (deftest load-file-is-one-original-request-with-only-the-final-result
   (with-server
     (fn [client session _]
-      (let [code "(ns history.example)\n(+ 1 1)\n(+ 2 2)"
+      (let [code "(ns history.example)\n\"intermediate-marker\"\n\"final-marker\""
             responses (request client session {:op "load-file" :file code
                                                :file-path "history/example.clj"
                                                :file-name "example.clj"})
@@ -84,26 +84,30 @@
         (is (= 1 (count (:entries (api/nrepl-history)))))
         (is (= "load-file" (:op recorded)))
         (is (= code (:input recorded)))
-        (is (= "history/example.clj" (:file recorded)))
-        (is (= ["4"] (vec (keep :value responses))
-              (vec (keep :value (:events recorded))))))
+        (is (= ["\"final-marker\""] (vec (keep :value responses))))
+        (is (str/includes? (:output recorded) "final-marker"))
+        (is (not (str/includes? (:output recorded) "intermediate-marker"))))
       (remove-ns 'history.example))))
 
 
-(deftest protocol-errors-and-eval-failures-remain-visible
+(deftest eval-errors-are-text-not-inferred-status
   (with-server
     (fn [client session _]
-      (request client session {:op "eval" :code "(/ 1 0)"})
-      (is (= :failed (:status (latest))))
-      (is (some :ex (:events (latest))))
-      (is (some :err (:events (latest))))
-      (request client session {:op "eval" :ns "no.such.history.namespace" :code "1"})
-      (is (= :failed (:status (latest))))
-      (request client "no-such-session" {:op "eval" :code "1"})
-      (is (= :failed (:status (latest)))))))
+      (let [responses (request client session {:op "eval" :code "(/ 1 0)"})
+            output (:output (latest))]
+        (is (some :ex responses))
+        (is (some :err responses))
+        (doseq [key [:err :ex :root-ex]
+                text (keep key responses)]
+          (is (str/includes? output text)))
+        (is (not (contains? (latest) :status))))
+      ;; Protocol statuses still reach the client, but are not transcript text.
+      (let [responses (request client "no-such-session" {:op "eval" :code "1"})]
+        (is (some #(some #{"error"} (:status %)) responses))
+        (is (= "" (:output (latest))))))))
 
 
-(deftest printer-runs-only-once-and-streamed-chunks-are-preserved
+(deftest printer-runs-only-once-and-streamed-chunks-are-captured
   (with-server
     (fn [client session _]
       ;; nREPL itself realizes the lazy result. Capturing may not do so again.
@@ -111,14 +115,29 @@
                         {:op "eval"
                          :code "(map (fn [x] (println \"realized\") x) (range 3))"
                          :nrepl.middleware.print/stream? 1
-                         :nrepl.middleware.print/buffer-size 2})]
-        (is (= (vec (keep :value responses)) (vec (keep :value (:events (latest))))))
+                         :nrepl.middleware.print/buffer-size 2})
+            output (:output (latest))]
         (is (= "(0 1 2)" (apply str (keep :value responses))))
-        (is (= 3 (count (re-seq #"realized" (apply str (keep :out responses)))))))
-      (request client session {:op "eval" :code "(range 100)"
-                               :nrepl.middleware.print/stream? 1
-                               :nrepl.middleware.print/quota 10})
-      (is (:incomplete? (latest))))))
+        (doseq [value (keep :value responses)]
+          (is (str/includes? output value)))
+        (is (= 3 (count (re-seq #"realized" (apply str (keep :out responses))))))
+        (is (= 3 (count (re-seq #"realized" output))))))))
+
+
+(deftest truncation-does-not-change-what-the-client-receives
+  (api/nrepl-capture! {:max-chars 16})
+  (with-server
+    (fn [client session _]
+      (let [code "(do (print (apply str (repeat 1000 \"x\"))) (flush) \"last-result\")"
+            responses (request client session {:op "eval" :code code})
+            recorded (latest)]
+        (is (= (apply str (repeat 1000 "x")) (apply str (keep :out responses))))
+        (is (= ["\"last-result\""] (vec (keep :value responses))))
+        (is (= (subs code 0 16) (:input recorded)))
+        (is (<= (count (:output recorded)) 16))
+        (is (str/includes? (:output recorded) "last-result"))
+        (is (:input-truncated? recorded))
+        (is (:output-truncated? recorded))))))
 
 
 (deftest completion-and-explicitly-suppressed-evals-do-not-enter-history
@@ -144,48 +163,18 @@
       (is (= "4" (:input (latest)))))))
 
 
-(deftest running-output-and-interrupts-are-attributed-to-the-original-eval
+(deftest running-output-is-readable-and-interrupts-do-not-create-entries
   (with-server
     (fn [client session connection]
       (transport/send connection {:op "eval" :id "waiting" :session session
                                   :code "(do (println \"working\") (flush) (Thread/sleep 30000))"})
       (let [first-response (transport/recv connection 5000)]
         (is (= "working\n" (:out first-response)))
-        (is (= :running (:status (latest))))
-        (is (= ["working\n"] (vec (keep :out (:events (latest)))))))
+        (is (str/includes? (:output (latest)) "working\n")))
       (request client session {:op "interrupt" :interrupt-id "waiting"})
-      (let [recorded (latest)]
-        ;; Interrupt and error responses can race for the non-blocking recorder.
-        (is (contains? #{:interrupted :unknown} (:status recorded)))
-        (when (= :unknown (:status recorded))
-          (is (:capture-gaps? recorded)))
-        (is (= "waiting" (:request-id recorded))))
+      (is (= "waiting" (:request-id (latest))))
+      (is (not (contains? (latest) :status)))
       (is (= 1 (count (:entries (api/nrepl-history))))))))
-
-
-(deftest interrupt-contention-reports-loss-without-blocking-the-client
-  (with-server
-    (fn [client session connection]
-      (transport/send connection {:op "eval" :id "waiting" :session session
-                                  :code "(do (println \"working\") (flush) (Thread/sleep 30000))"})
-      (is (= "working\n" (:out (transport/recv connection 5000))))
-      (let [id (:id (latest))
-            gaps (:capture-gaps (api/nrepl-capture!))
-            writer @#'history/writer]
-        ;; The server must deliver the interrupt while this thread holds the
-        ;; capture lock. No sleeps or scheduler luck are needed to force loss.
-        (ReentrantLock/.lock writer)
-        (try
-          (let [responses (request client session {:op "interrupt" :interrupt-id "waiting"})
-                recorded (api/nrepl-transcript id)]
-            (is (= #{"done"} (set (mapcat :status responses))))
-            (is (= :unknown (:status recorded)))
-            (is (:capture-gaps? recorded))
-            (is (> (:capture-gaps (api/nrepl-capture!)) gaps))
-            (is (= "waiting" (:request-id recorded)))
-            (is (= session (:session recorded)))
-            (is (= ["working\n"] (vec (keep :out (:events recorded))))))
-          (finally (ReentrantLock/.unlock writer)))))))
 
 
 (deftest failing-recorder-does-not-affect-the-real-client
@@ -194,9 +183,7 @@
       (with-redefs [history/begin! (fn [_] (throw (Exception. "capture failed")))]
         (is (= ["3"] (vec (keep :value (request client session {:op "eval" :code "3"}))))))
       (with-redefs [history/response! (fn [& _] (throw (Exception. "capture failed")))]
-        (is (= ["4"] (vec (keep :value (request client session {:op "eval" :code "4"}))))))
-      (is (pos? (:capture-gaps (api/nrepl-capture!))))
-      (is (:capture-gaps? (latest))))))
+        (is (= ["4"] (vec (keep :value (request client session {:op "eval" :code "4"})))))))))
 
 
 (deftest boolean-opt-out-works-before-wire-encoding
@@ -223,7 +210,7 @@
     (handler {:op "eval" :code "1" :transport wire})
     (is (identical? value (:value @sent)))
     (is (false? @touched))
-    (is (:incomplete? (latest)))))
+    (is (= "" (:output (latest))))))
 
 
 (deftest handler-and-transport-failures-are-not-swallowed
@@ -231,8 +218,7 @@
         handler (recorder/wrap-history (fn [_] (throw failure)))]
     (is (identical? failure
           (try (handler {:op "eval" :code "1"})
-               (catch Exception e e))))
-    (is (= :failed (:status (latest)))))
+               (catch Exception e e)))))
   (let [failure (Exception. "transport failure")
         wire (reify transport/Transport
                (recv [_] nil)

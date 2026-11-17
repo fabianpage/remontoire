@@ -104,25 +104,31 @@ loaded pattern namespaces: `(__r/nses "patterns")` is the index, `outline` and `
 ## Editor nREPL history
 
 When the host installs `co.multiply.remontoire.nrepl/wrap-history` and explicitly enables recording, the toolkit can
-read recent editor evaluations as well as MCP work. `(__r/nrepl-history)` returns newest-first summaries and capture
-settings/loss counters; filter by `:session`, `:status`, `:since` (epoch milliseconds), or paginate with `:before`
-(history id). `(__r/nrepl-transcript id)` reads the input and ordered response events for one history id, including
-printed values, stdout/stderr and available errors. Running entries contain partial output. Ask which nREPL session
-belongs to the human if several could match; do not silently guess what "my last command" means.
+read recent editor evaluations as well as MCP work. `(__r/nrepl-history)` returns all retained summaries, newest start
+first, with settings in `:capture`. Filter the returned `:entries` in Clojure if needed; the function takes no options.
+`(__r/nrepl-transcript id)` reads one snapshot: identity and start time, `:input` (code prefix), `:output` (labeled text
+tail), `:input-truncated?`, and `:output-truncated?`. A missing id returns `{:id id :missing true}`. Ask which nREPL
+session belongs to the human if several could match; do not silently guess what "my last command" means.
 
-These are **transcripts, not task-registry entries**. Their ids cannot be passed to `res`, `out`, `failure`, or cancel.
-No original result objects are retained; strings reflect nREPL's own printing, without a second realization or print.
-Only JVM Clojure `eval` and `load-file` requests become entries. Other editor operations are ignored, but unmarked
-automated evals may still appear. Output not sent through a request's nREPL transport is outside this history.
+These are **text snapshots, not task-registry entries**. Their ids cannot be passed to `res`, `out`, `failure`, or
+cancel. No original result objects are retained or printed again. Output includes printed values, stdout/stderr and
+exception strings, but not protocol statuses. There is no inferred running/done/failed/interrupted state: a snapshot
+is not proof of completion. nREPL's own printing settings can omit content beyond what our truncation flags report.
+Only JVM Clojure `eval` and `load-file` requests become entries. Other operations are ignored, but unmarked automated
+evals may still appear. Unattributed background output is outside this history; capture failures do not break nREPL.
 
-Read `:truncated?`, `:incomplete?`, `:capture-gaps?`, and the listing's `:capture` information before drawing conclusions
-from absent evidence. Completion can be `:unknown` after a capture gap or pause. Retention is bounded and oldest-first,
-even for running requests: unlike MCP work, history has no unread-result protection and reading does not refresh it.
-Missing ids report why. This is best-effort history, not an audit log, and cannot recover commands before recording.
+Defaults are `{:enabled? false :max-entries 5 :max-chars 10000}`. The count is global across the JVM, ordered by start,
+including running evaluations. The character limit counts Unicode code points independently for input and output,
+not UTF-8 bytes or model tokens. Keep the beginning of code and the end of labeled output; labels count toward the
+limit and the tail can start mid-line or mid-label. Smaller limits immediately trim/evict existing snapshots; larger
+limits cannot restore content. Reads do not refresh retention. Writers serialize bounded text updates rather than
+drop captures on contention, so recording can briefly delay an nREPL response. This is diagnostic context, not an audit
+log, and cannot recover commands from before recording started.
 
-`(__r/nrepl-capture!)` reports configuration and loss information. Its map arity changes settings, including
-`{:enabled? false}` to pause or `{:enabled? true}` to resume. `(__r/clear-nrepl-history!)` clears retained content without
-changing recording settings. Do not enable recording or clear the human's history without their authorization.
+`(__r/nrepl-capture!)` reports settings and retained count; its map arity merges settings. Pause with `{:enabled? false}`
+to freeze existing snapshots. Resume with `{:enabled? true}` to capture only new evaluations; old ones never resume
+appending. `(__r/clear-nrepl-history!)` clears snapshots without changing settings or reusing ids. Late output cannot
+restore cleared or evicted entries. Do not enable recording or clear the human's history without their authorization.
 All trusted agents on this instance can read captured inputs and outputs, including secrets; there is no automatic
 redaction. Clearing cannot retract copies already read. No nREPL history is automatically added to MCP responses.
 

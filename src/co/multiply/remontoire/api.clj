@@ -137,48 +137,46 @@
 
 
 (defn nrepl-history
-  "Recent nREPL transcript summaries, newest first; not MCP registry entries.
-   Capture is optional and must be installed and enabled by the host.
+  "All retained nREPL summaries, newest evaluation start first; not MCP entries.
+   Returns {:capture {...settings, :entries count} :entries [...]}.
+   Summaries omit :input and :output; use `nrepl-transcript` for those.
 
-   Options: :limit (default 20, capped at 200), :session (nREPL session id),
-   :status (:running, :done, :failed, :interrupted, :unknown), :since (inclusive
-   epoch milliseconds), :before (exclusive history id, for pagination).
-
-   Returns {:capture {...settings, usage, loss counters...} :entries [...]}.
-   Summaries omit input/output; use `nrepl-transcript` for those. All captured
-   nREPL sessions in this JVM are visible. If 'my last command' is ambiguous,
-   ask which session rather than guessing. Inspect loss markers before drawing
-   conclusions from missing evidence. Reads do not refresh retention."
-  ([] (history/recent))
-  ([opts] (history/recent opts)))
+   Capture must be installed and explicitly enabled by the host. The default
+   is five evaluations across the JVM, including running ones. Filter the
+   returned :entries in Clojure if needed. If 'my last command' is ambiguous,
+   ask which session rather than guessing. Reads do not refresh retention."
+  []
+  (history/recent))
 
 
 (defn nrepl-transcript
-  "Read one nREPL history id, NOT an MCP eval id. Returns request metadata,
-   :input, :status and ordered :events (printed :value, :out, :err, error
-   fields and status strings), or {:id id :missing reason}.
+  "Read one nREPL history id, NOT an MCP eval id. Returns identity, start time,
+   :input (code prefix), :output (labeled text tail), :input-truncated? and
+   :output-truncated?, or {:id id :missing true} when no longer retained.
 
-   Text only — no live values to deref, compose, cancel, or replay. Running
-   entries carry partial output. :truncated?, :incomplete? and :capture-gaps?
-   warn of missing evidence; :unknown status means completion is uncertain.
-   Strings are what nREPL emitted, subject to its own printer settings and our
-   caps. Unattributed background JVM output is not part of this transcript."
+   Text only — no live values or inferred execution status. Output contains
+   already-printed :value, :out, :err, :ex and :root-ex strings. Labels count
+   toward the output limit; the tail may start mid-line or mid-label. Flags
+   describe our truncation only: nREPL's own printer settings can omit more.
+   Protocol statuses and unattributed background output are not captured.
+   A snapshot is diagnostic context, not proof of completion or an audit log."
   [id]
   (history/transcript id))
 
 
 (defn nrepl-capture!
-  "With no args, report nREPL recording settings, usage and loss counters.
-   With a map, merge settings: :enabled? (default false), :max-entries (200),
-   :entry-bytes (65536), :total-bytes (8388608). Requires optional middleware
-   `co.multiply.remontoire.nrepl/wrap-history` in the host's nREPL stack.
+  "With no args, report recording settings and retained entry count. With a
+   map, merge :enabled? (default false), :max-entries (5), :max-chars (10000).
+   Requires `co.multiply.remontoire.nrepl/wrap-history` in the nREPL stack.
 
-   Pause/resume with {:enabled? false/true}. Pausing keeps history, but marks
-   in-flight transcripts incomplete; resuming cannot recover missed messages.
-   Limits count UTF-8 text plus fixed bookkeeping allowances, not exact heap
-   bytes. Oldest entries, even running ones, may be evicted. Lowering an entry
-   limit evicts through the newest oversized entry. Capture never waits for a
-   reader or another writer; contention/failures increase :capture-gaps.
+   :max-chars counts Unicode code points, independently for input and output,
+   not UTF-8 bytes or model tokens. Keep the beginning of code and the end of
+   labeled output. Smaller limits immediately trim/evict existing snapshots;
+   increasing limits cannot recover discarded content. Reads do not pin entries.
+
+   Pause with {:enabled? false}; retained snapshots freeze. Resume with
+   {:enabled? true}; only new evaluations are captured. Writers briefly
+   serialize bounded text updates, so capture may delay an nREPL response.
 
    All trusted agents can read captured inputs/results, including secrets.
    Enable only deliberately; there is no automatic redaction."
@@ -188,8 +186,8 @@
 
 (defn clear-nrepl-history!
   "Delete retained nREPL history without changing recording settings. Late
-   responses cannot restore it and ids aren't reused. Loss counters remain
-   cumulative. Cannot retract copies already read by an agent."
+   responses cannot restore it and ids aren't reused. Cannot retract copies
+   already read by an agent."
   []
   (history/clear!))
 

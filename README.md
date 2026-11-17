@@ -202,7 +202,15 @@ The [MCP endpoint](#starting-the-endpoint) must be running in the **same JVM** a
 does not start MCP or enable recording, and commands run before recording began cannot be recovered.
 
 Now ask your agent what you last ran or why it failed. It can use `(__r/nrepl-history)` to list recent evaluations
-and `(__r/nrepl-transcript id)` to read one. History is bounded and kept in memory only.
+and `(__r/nrepl-transcript id)` to read one. History is kept in memory only. By default it keeps the **five most
+recently started evaluations across the JVM**, including running ones, with independent limits of **10,000 Unicode
+code points** for code and output. These are characters, not UTF-8 bytes or model tokens.
+
+Configure both limits with:
+
+```clojure
+(r/nrepl-capture! {:max-entries 5 :max-chars 10000})
+```
 
 Pause recording with `(r/nrepl-capture! {:enabled? false})`, or delete retained history with
 `(r/clear-nrepl-history!)`. Clearing cannot retract copies an agent has already read.

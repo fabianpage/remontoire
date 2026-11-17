@@ -1,374 +1,153 @@
 (ns co.multiply.remontoire.history
-  "Bounded, best-effort nREPL transcripts, independent of the task registry.
-   No nREPL dependency here: only copied strings and fixed bookkeeping enter
-   the store. The optional middleware owns protocol interception."
-  (:import
-    (java.util.concurrent.atomic AtomicLong)
-    (java.util.concurrent.locks ReentrantLock)))
+  "Recent nREPL text snapshots, independent of the task registry. No nREPL
+   dependency or execution-status tracking; the optional middleware supplies
+   already-printed strings. Writers serialize short, bounded updates.")
 
 
 (def ^:private defaults
-  {:enabled? false :max-entries 200 :entry-bytes 65536 :total-bytes 8388608})
+  {:enabled? false :max-entries 5 :max-chars 10000})
 
 
 (defonce ^:private state
-  (atom {:config defaults :entries (sorted-map) :next-id 0 :bytes 0
-         :evicted-through 0 :cleared-through 0 :pauses 0}))
+  (atom {:config defaults :entries (sorted-map) :next-id 0 :capture-after 0}))
 
 
-(defonce ^:private writer (ReentrantLock.))
-(defonce ^:private gaps (AtomicLong.))
+(defn- clip
+  "Return [text truncated?], keeping a code-point prefix or tail. Walk at most
+   limit code points, even for huge inputs; never split a surrogate pair."
+  [^String text limit tail?]
+  (let [length (String/.length text)
+        end (if tail? 0 length)]
+    (loop [i (if tail? length 0) n 0]
+      (if (or (= i end) (= n limit))
+        [(if tail? (subs text i) (subs text 0 i)) (not= i end)]
+        (let [cp (if tail? (String/.codePointBefore text i) (String/.codePointAt text i))
+              width (Character/charCount cp)]
+          (recur (if tail? (- i width) (+ i width)) (inc n)))))))
 
 
-(defn gap!
-  "Record a missed capture without retaining the exception or message."
-  []
-  (AtomicLong/.incrementAndGet gaps)
-  nil)
+(defn- trim-entry
+  [entry limit]
+  (let [[input input-cut?] (clip (:input entry) limit false)
+        [output output-cut?] (clip (:output entry) limit true)]
+    (cond-> (assoc entry :input input :output output)
+      input-cut? (assoc :input-truncated? true)
+      output-cut? (assoc :output-truncated? true))))
 
 
-(defn- capture!
-  "Never wait for another writer, retry a transaction, or propagate a capture
-   failure into nREPL. Control operations may lock; the recording path may not."
-  [f]
-  (try
-    (when (get-in @state [:config :enabled?])
-      (if (ReentrantLock/.tryLock writer)
-        (try
-          (when (get-in @state [:config :enabled?]) (f))
-          (finally (ReentrantLock/.unlock writer)))
-        (gap!)))
-    (catch Throwable _ (gap!))))
-
-
-(defn- prefix
-  "Copy a UTF-8-bounded prefix without encoding or scanning the entire input.
-   Never split a surrogate pair. Return [text byte-count truncated?]."
-  [^String s budget]
-  (let [length (String/.length s)]
-    (loop [i 0 used 0]
-      (if (= i length)
-        [(String. (String/.substring s 0 i)) used false]
-        (let [cp (String/.codePointAt s i)
-              width (Character/charCount cp)
-              bytes (cond (<= cp 0x7f) 1 (<= cp 0x7ff) 2
-                          (<= 0xd800 cp 0xdfff) 1
-                          (<= cp 0xffff) 3 :else 4)]
-          (if (> (+ used bytes) budget)
-            [(String. (String/.substring s 0 i)) used true]
-            (recur (+ i width) (long (+ used bytes)))))))))
-
-
-(defn- text-field
-  "Charge text and a fixed allowance per field. Unknown objects are omitted,
-   never printed, dereferenced, or walked. Even empty strings cost space."
-  [entry path value limit]
-  (cond
-    (nil? value) entry
-    (not (string? value)) (assoc entry :incomplete? true)
-    (< (- limit (:bytes entry)) 32) (assoc entry :truncated? true)
-    :else
-    (let [[s bytes truncated?] (prefix value (- limit (:bytes entry) 32))]
-      (cond-> (-> entry
-                  (assoc-in path s)
-                  (update :bytes + bytes 32))
-        truncated? (assoc :truncated? true)))))
-
-
-(defn- evict
-  [s]
-  (let [{:keys [max-entries total-bytes]} (:config s)]
-    (loop [s s]
-      (if (or (> (count (:entries s)) max-entries) (> (:bytes s) total-bytes))
-        (let [[id entry] (first (:entries s))]
-          (recur (-> s
-                     (update :entries dissoc id)
-                     (update :bytes - (:bytes entry))
-                     (assoc :evicted-through id))))
-        s))))
-
-
-(defn- put-entry
-  [s entry]
-  (let [old-bytes (get-in s [:entries (:id entry) :bytes] 0)]
-    (evict (-> s
-               (assoc-in [:entries (:id entry)] entry)
-               (update :bytes + (- (:bytes entry) old-bytes))))))
+(defn- newest
+  [entries limit]
+  (into (sorted-map) (take limit (rseq entries))))
 
 
 (defn begin!
-  "Capture an eval/load-file request. Returns an id, or nil when not recording.
-   Only the middleware calls this; request maps are never retained."
-  [{:keys [op session id ns file file-path file-name code line column]}]
-  (capture!
-    (fn []
-      (let [s @state
-            next-id (inc (:next-id s))
-            limit (get-in s [:config :entry-bytes])
-            entry {:id next-id :op op :at (System/currentTimeMillis)
-                   :status :running :bytes 256 :events []
-                   :gap-at (AtomicLong/.get gaps)}
-            entry (reduce (fn [e [k v]] (text-field e [k] v limit)) entry
-                    [[:session session] [:request-id id] [:ns ns]
-                     [:file (if (= op "load-file") file-path file)]
-                     [:file-name file-name]])
-            entry (assoc entry :identity-complete?
-                    (and (= session (:session entry)) (= id (:request-id entry))))
-            entry (cond-> entry
-                    (int? line) (assoc :line line)
-                    (int? column) (assoc :column column))
-            entry (text-field entry [:input] (if (= op "load-file") file code) limit)]
-        (reset! state (put-entry (assoc s :next-id next-id) entry))
-        next-id))))
+  "Capture the start of an eval/load-file request; return its history id, or
+   nil while disabled. Request maps and non-string values are never retained."
+  [{:keys [op session id code file]}]
+  (locking state
+    (let [{:keys [config next-id] :as s} @state]
+      (when (:enabled? config)
+        (let [id' (inc next-id)
+              input (if (= op "load-file") file code)
+              [input cut?] (clip (if (string? input) input "") (:max-chars config) false)
+              entry {:id id' :op op :at (System/currentTimeMillis)
+                     :session (when (string? session) session)
+                     :request-id (when (string? id) id)
+                     :input input :output ""
+                     :input-truncated? cut? :output-truncated? false}]
+          (reset! state (assoc s :next-id id'
+                         :entries (newest (assoc (:entries s) id' entry) (:max-entries config))))
+          id')))))
 
 
-(defn- status-values
-  [status]
-  (cond
-    (nil? status) []
-    (or (string? status) (keyword? status)) [status]
-    (coll? status) (take 33 status)
-    :else [status]))
-
-
-(defn- statuses
-  [status]
-  ;; nREPL uses keywords before bencode and strings after it. Keep a bounded
-  ;; set of known evidence; never intern arbitrary client-provided names.
-  (let [known {"done" :done :done :done
-               "interrupted" :interrupted :interrupted :interrupted
-               "eval-error" :eval-error :eval-error :eval-error
-               "error" :error :error :error
-               "print-quota-exceeded" :print-quota-exceeded
-               :print-quota-exceeded :print-quota-exceeded
-               "nrepl.middleware.print/truncated" :nrepl.middleware.print/truncated
-               :nrepl.middleware.print/truncated :nrepl.middleware.print/truncated}
-        xs (take 32 (status-values status))]
-    (into #{} (keep known) xs)))
-
-
-(defn- update-outcome
-  "Track completion even when the transcript has no room for more text."
-  [entry response]
-  (let [flags (statuses (:status response))
-        outcome (cond
-                  (or (= :interrupted (:outcome entry)) (flags :interrupted)) :interrupted
-                  (or (= :failed (:outcome entry)) (flags :error) (flags :eval-error)
-                      (:ex response)) :failed
-                  :else :done)
-        terminal? (or (flags :done) (flags :interrupted))]
-    (cond-> (assoc entry :outcome outcome)
-      terminal? (assoc :status outcome :finished-at (System/currentTimeMillis))
-      (or (flags :print-quota-exceeded)
-          (flags :nrepl.middleware.print/truncated)) (assoc :incomplete? true))))
-
-
-(defn- append-event
-  [entry response limit]
-  (let [fields [:value :out :err :ex :root-ex :ns :nrepl.middleware.caught/throwable]
-        meaningful? (or (some? (:status response)) (some #(contains? response %) fields))]
-    (cond
-      (not meaningful?) entry
-      (< (- limit (:bytes entry)) 64) (assoc entry :truncated? true)
-      :else
-      (let [i (count (:events entry))
-            values (vec (status-values (:status response)))
-            entry (cond-> (-> entry
-                              (update :bytes + 64)
-                              (update :events conj {:at (System/currentTimeMillis) :status []}))
-                    (> (count values) 32) (assoc :truncated? true))
-            entry (reduce (fn [e v]
-                            (let [v (if (keyword? v) (subs (str v) 1) v)
-                                  j (count (get-in e [:events i :status]))]
-                              (text-field e [:events i :status j] v limit)))
-                    entry (take 32 values))]
-        (reduce (fn [e k] (text-field e [:events i k] (get response k) limit))
-          entry fields)))))
-
-
-(defn- add-response
-  [entry response limit]
-  (let [entry (update-outcome entry response)
-        ;; The response can resolve an ephemeral session's id. Bound its copy
-        ;; just like every other field, and do not retain the session atom.
-        entry (if (nil? (:session entry))
-                (text-field entry [:session] (:session response) limit)
-                entry)]
-    (append-event entry response limit)))
+(defn- append-output
+  [entry k value limit]
+  (if (and (string? value) (seq value))
+    ;; Clip before concatenation: never copy a huge response just to trim it.
+    (let [[value value-cut?] (clip value limit true)
+          [output output-cut?] (clip (str (:output entry) "[" (name k) "] " value "\n") limit true)]
+      (cond-> (assoc entry :output output)
+        (or value-cut? output-cut?) (assoc :output-truncated? true)))
+    entry))
 
 
 (defn response!
-  "Append an outgoing response to a retained request, if still recording.
-   Late responses cannot resurrect an evicted or cleared entry."
+  "Append printed value/out/err and exception strings to a retained snapshot.
+   Status-only responses are ignored. Evicted, cleared and pre-pause requests
+   cannot write back into history, even after recording is enabled again."
   [id response]
-  (capture!
-    (fn []
-      (when-let [entry (get-in @state [:entries id])]
-        (reset! state (put-entry @state
-                        (add-response entry response (get-in @state [:config :entry-bytes]))))))))
-
-
-(defn interrupt!
-  "Interrupt notifications use the interrupt request's transport, not the
-   original eval's. Match the original request id AND session; never guess."
-  [response]
-  (when ((statuses (:status response)) :interrupted)
-    (capture!
-      (fn []
-        (let [s @state
-              entry (some (fn [[_ e]]
-                            (when (and (:identity-complete? e)
-                                       (string? (:session response))
-                                       (string? (:id response))
-                                       (= (:session e) (:session response))
-                                       (= (:request-id e) (:id response)))
-                              e))
-                      (rseq (:entries s)))]
-          (when entry
-            (reset! state (put-entry s
-                            (add-response entry response (get-in s [:config :entry-bytes]))))))))))
-
-
-(defn- visible-entry
-  [entry gap-count]
-  (let [missed? (> gap-count (:gap-at entry))]
-    (cond-> (dissoc entry :gap-at :identity-complete? :outcome)
-      missed? (assoc :capture-gaps? true)
-      (and missed? (= :running (:status entry))) (assoc :status :unknown))))
+  (locking state
+    (let [{:keys [config capture-after entries] :as s} @state]
+      (when (and (:enabled? config) (> id capture-after))
+        (when-let [entry (get entries id)]
+          (let [entry (cond-> entry
+                        (and (nil? (:session entry)) (string? (:session response)))
+                        (assoc :session (:session response)))
+                entry (reduce (fn [e k] (append-output e k (get response k) (:max-chars config)))
+                        entry [:out :err :value :ex :root-ex])]
+            (reset! state (assoc-in s [:entries id] entry)))))))
+  nil)
 
 
 (defn- status-of
   [s]
-  (merge (:config s)
-    (select-keys s [:bytes :evicted-through :cleared-through :cleared-at
-                    :pauses :last-paused-at :last-enabled-at])
-    {:entries (count (:entries s)) :latest-id (:next-id s)
-     :capture-gaps (AtomicLong/.get gaps)}))
+  (assoc (:config s) :entries (count (:entries s))))
 
 
 (defn status
-  "Recording configuration, usage and loss counters. Byte budgets account for
-   UTF-8 text plus fixed entry/field/event allowances, not exact JVM heap size.
-   Positive :capture-gaps means capture failed or a writer was busy; affected
-   entries are conservatively marked even when the lost message was elsewhere."
+  "Capture settings and retained entry count. Character limits count Unicode
+   code points, independently for input and labeled output; not bytes or tokens."
   []
   (status-of @state))
 
 
 (defn recent
-  "Newest-first summaries, no inputs or outputs. Options: :limit (default 20,
-   capped at 200), :session, :status, :since (inclusive epoch milliseconds),
-   :before (exclusive history id for pagination). The envelope always includes
-   retention and capture-loss information, including when no entries match."
-  ([] (recent {}))
-  ([{:keys [limit session status since before] :or {limit 20}}]
-   (when-not (and (int? limit) (<= 0 limit)
-                 (or (nil? since) (int? since))
-                 (or (nil? before) (int? before)))
-     (throw (ex-info "Invalid history query bounds" {})))
-   (let [s @state
-         gap-count (AtomicLong/.get gaps)]
-     {:capture (status-of s)
-      :entries (->> (rseq (:entries s))
-                    (map (fn [[_ e]] (visible-entry e gap-count)))
-                    (filter #(and (or (nil? session) (= session (:session %)))
-                                  (or (nil? status) (= status (:status %)))
-                                  (or (nil? since) (<= since (:at %)))
-                                  (or (nil? before) (< (:id %) before))))
-                    (take (min 200 limit))
-                    (mapv #(dissoc % :input :events)))})))
+  "All retained summaries, newest start first, plus capture settings. Filter
+   the returned :entries in Clojure if needed. Reads never refresh retention."
+  []
+  (let [s @state]
+    {:capture (status-of s)
+     :entries (mapv #(dissoc (val %) :input :output) (rseq (:entries s)))}))
 
 
 (defn transcript
-  "One transcript, or an explicit :missing reason. History ids are not registry
-   ids. Reading neither refreshes retention nor claims ownership of the result."
+  "One text snapshot, or {:id id :missing true}. History ids are not task
+   registry ids. Absence of output says nothing about execution status."
   [id]
   (when-not (and (int? id) (pos? id))
     (throw (ex-info "History id must be a positive integer" {})))
-  (let [s @state]
-    (if-let [entry (get-in s [:entries id])]
-      (visible-entry entry (AtomicLong/.get gaps))
-      {:id id :missing (cond
-                         (<= id (:cleared-through s)) :cleared
-                         (<= id (:next-id s)) :evicted
-                         :else :unknown)})))
-
-
-(defn- checked-config
-  [config opts]
-  (let [config (merge config opts)]
-    (when-not (and (boolean? (:enabled? config))
-                  (every? #(and (int? %) (pos? %))
-                    (map config [:max-entries :entry-bytes :total-bytes]))
-                  (<= 256 (:entry-bytes config)) (<= 256 (:total-bytes config)))
-      (throw (ex-info "Invalid history limits" {})))
-    config))
-
-
-(defn- apply-capture-mode
-  "Install the config, recording transitions and marking paused work incomplete."
-  [s config now]
-  (let [enabled? (:enabled? config)
-        changed? (not= enabled? (get-in s [:config :enabled?]))
-        s (cond-> (assoc s :config config)
-            (and changed? enabled?) (assoc :last-enabled-at now)
-            (and changed? (not enabled?))
-            (assoc :last-paused-at now :pauses (inc (:pauses s 0))))]
-    (if enabled?
-      s
-      (update s :entries
-        (fn [entries]
-          (reduce-kv (fn [entries id entry]
-                       (if (= :running (:status entry))
-                         (assoc entries id (assoc entry :status :unknown :incomplete? true))
-                         entries))
-            entries entries))))))
-
-
-(defn- enforce-limits
-  "Evict through the newest oversized entry, then enforce count and total bytes."
-  [s]
-  (let [limit (get-in s [:config :entry-bytes])
-        oversized (->> (:entries s)
-                       (keep (fn [[id e]] (when (> (:bytes e) limit) id)))
-                       last)
-        doomed (when oversized (take-while (fn [[id _]] (<= id oversized)) (:entries s)))]
-    (evict
-      (reduce (fn [s [id e]]
-                (-> s
-                    (update :entries dissoc id)
-                    (update :bytes - (:bytes e))
-                    (assoc :evicted-through id)))
-        s doomed))))
+  (get-in @state [:entries id] {:id id :missing true}))
 
 
 (defn configure!
-  "Merge capture options. Disabled until explicitly enabled. Limits are positive
-   integers, with at least 256 bytes per entry and total. Reducing entry-bytes
-   evicts entries already larger than it (oldest first through the last one).
-   Pausing marks in-flight entries unknown/incomplete; resume cannot recover
-   responses missed while paused. Control operations serialize with recording."
+  "Merge :enabled?, :max-entries and :max-chars. Counts must be positive
+   integers. Smaller limits immediately evict oldest entries and trim text;
+   increasing limits cannot recover discarded content. Pausing freezes all
+   existing snapshots; resume captures only newly started evaluations."
   [opts]
   (when-not (and (map? opts) (every? (set (keys defaults)) (keys opts)))
     (throw (ex-info "Unknown history configuration option" {})))
-  (ReentrantLock/.lock writer)
-  (try
+  (locking state
     (let [s @state
-          config (checked-config (:config s) opts)]
-      (reset! state (-> s
-                       (apply-capture-mode config (System/currentTimeMillis))
-                       enforce-limits))
-      (status))
-    (finally (ReentrantLock/.unlock writer))))
+          config (merge (:config s) opts)]
+      (when-not (and (boolean? (:enabled? config))
+                    (every? #(and (int? %) (pos? %)) (map config [:max-entries :max-chars])))
+        (throw (ex-info "Invalid history limits" {})))
+      (let [entries (newest (:entries s) (:max-entries config))
+            s (cond-> (assoc s :config config
+                        :entries (into (sorted-map)
+                                   (map (fn [[id e]] [id (trim-entry e (:max-chars config))]))
+                                   entries))
+                (not (:enabled? config)) (assoc :capture-after (:next-id s)))]
+        (reset! state s)
+        (status-of s)))))
 
 
 (defn clear!
-  "Delete retained content without changing capture settings or reusing ids.
-   Already-fetched copies cannot be retracted. Loss counters remain cumulative."
+  "Delete snapshots without changing settings or reusing ids. Late responses
+   cannot restore them. Copies already read by an agent cannot be retracted."
   []
-  (ReentrantLock/.lock writer)
-  (try
-    (swap! state #(assoc % :entries (sorted-map) :bytes 0
-                   :cleared-through (:next-id %) :cleared-at (System/currentTimeMillis)))
-    (status)
-    (finally (ReentrantLock/.unlock writer))))
+  (locking state
+    (let [s (assoc @state :entries (sorted-map))]
+      (reset! state s)
+      (status-of s))))

@@ -12,45 +12,36 @@
 
 (defn- observe
   [f]
-  (try (f) (catch Throwable _ (history/gap!))))
+  (try (f) (catch Throwable _ nil)))
 
 
 (defn wrap-history
-  "Observe eval/load-file inputs and printed outgoing responses. Install this
+  "Capture eval/load-file code and already-printed outgoing text. Install this
    var via nREPL's middleware stack AND enable capture with
    `co.multiply.remontoire.api/nrepl-capture!`. Installation alone is inert.
 
-   Completion, lookup, and other non-eval operations aren't history entries.
-   Clients may suppress an automated eval with ::record? false (0 over bencode).
-   Unmarked evals are indistinguishable from human input and are captured.
+   Other operations, including interrupts, are not recorded. Clients may
+   suppress an automated eval with ::record? false (0 over bencode). Unmarked
+   evals are indistinguishable from human input and are captured.
 
-   Interrupt responses travel on a different request's transport; observe them
-   too, correlating by original request id and session. Never wrap evaluation,
-   print values ourselves, retain request maps, or suppress transport failures."
+   Never evaluate or print values ourselves, retain request maps, or suppress
+   handler/transport failures. Recording failures cannot break the client."
   [handler]
   (fn [{:keys [op transport] :as msg}]
     (let [record? (not (contains? #{false 0 "false"} (::record? msg)))
           history-id (when (and record? (#{"eval" "load-file"} op))
                        (observe #(history/begin! msg)))]
-      (if-not (or history-id (= op "interrupt"))
+      (if-not history-id
         (handler msg)
-        (let [wrapped (reify transport/Transport
-                        (recv [_] (transport/recv transport))
-                        (recv [_ timeout] (transport/recv transport timeout))
-                        (send [this response]
-                          (observe #(if history-id
-                                      (history/response! history-id response)
-                                      (history/interrupt! response)))
-                          (transport/send transport response)
-                          this))]
-          (try
-            (handler (assoc msg :transport wrapped))
-            (catch Throwable e
-              (when history-id
-                (observe #(history/response! history-id
-                            {:status #{:error :done}
-                             :ex (Class/.getName (Object/.getClass e))})))
-              (throw e))))))))
+        (handler
+          (assoc msg :transport
+            (reify transport/Transport
+              (recv [_] (transport/recv transport))
+              (recv [_ timeout] (transport/recv transport timeout))
+              (send [this response]
+                (observe #(history/response! history-id response))
+                (transport/send transport response)
+                this))))))))
 
 
 ;; Outer to session resolution, printing and load-file rewriting on ingress;
