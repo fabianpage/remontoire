@@ -206,14 +206,14 @@ and `(__r/nrepl-transcript id)` to read one. History is kept in memory only. By 
 recently started evaluations across the JVM**, including running ones, with independent limits of **10000 UTF-16
 codepoints** for code and output.
 
-Configure both limits with:
+Configure both limits at startup or later; changes apply on subsequent recordings:
 
 ```clojure
 (r/nrepl-capture! {:max-entries 5 :max-chars 10000})
 ```
 
-Pause recording with `(r/nrepl-capture! {:enabled? false})`, or delete retained history with
-`(r/clear-nrepl-history!)`. Clearing cannot retract copies an agent has already read.
+Stop recording and clear history with `(r/nrepl-capture! {:enabled? false})`, or clear history without stopping
+recording with `(r/clear-nrepl-history!)`. Clearing cannot retract copies an agent has already read.
 
 ## Connecting Claude Code
 

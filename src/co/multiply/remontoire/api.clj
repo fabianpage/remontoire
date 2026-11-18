@@ -151,13 +151,13 @@
 
 (defn nrepl-transcript
   "Read one nREPL history id, NOT an MCP eval id. Returns identity, start time,
-   :input (code prefix), :output (labeled text tail), :input-truncated? and
-   :output-truncated?, or {:id id :missing true} when no longer retained.
+   :input (code prefix) and :output (labeled text tail), or
+   {:id id :missing true} when no longer retained.
 
    Text only — no live values or inferred execution status. Output contains
    already-printed :value, :out, :err, :ex and :root-ex strings. Labels count
-   toward the output limit; the tail may start mid-line or mid-label. Flags
-   describe our truncation only: nREPL's own printer settings can omit more.
+   toward the output limit; the tail may start mid-line or mid-label. Text may
+   be truncated by capture limits or nREPL's own printer settings.
    Protocol statuses and unattributed background output are not captured.
    A snapshot is diagnostic context, not proof of completion or an audit log."
   [id]
@@ -171,12 +171,13 @@
 
    :max-chars counts UTF-16 code units, independently for input and output,
    not UTF-8 bytes or model tokens. Truncation may split a surrogate pair.
-   Keep the beginning of code and the end of
-   labeled output. Smaller limits immediately trim/evict existing snapshots;
-   increasing limits cannot recover discarded content. Reads do not pin entries.
+   Keep the beginning of code and the end of labeled output. Configure at
+   startup or later: entry limits apply on the next evaluation start, input
+   limits on new inputs, and output limits on subsequent appends. Untouched
+   snapshots stay unchanged. Increasing limits cannot recover discarded text.
 
-   Pause with {:enabled? false}; retained snapshots freeze. Resume with
-   {:enabled? true}; only new evaluations are captured. Writers briefly
+   Disable with {:enabled? false} to stop recording and clear history. Enable
+   with {:enabled? true} to capture only new evaluations. Writers briefly
    serialize bounded text updates, so capture may delay an nREPL response.
 
    All trusted agents can read captured inputs/results, including secrets.

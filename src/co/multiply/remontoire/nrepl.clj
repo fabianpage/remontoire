@@ -20,16 +20,14 @@
    var via nREPL's middleware stack AND enable capture with
    `co.multiply.remontoire.api/nrepl-capture!`. Installation alone is inert.
 
-   Other operations, including interrupts, are not recorded. Clients may
-   suppress an automated eval with ::record? false (0 over bencode). Unmarked
-   evals are indistinguishable from human input and are captured.
+   Other operations, including interrupts, are not recorded. Automated evals
+   are indistinguishable from human input and are captured.
 
    Never evaluate or print values ourselves, retain request maps, or suppress
    handler/transport failures. Recording failures cannot break the client."
   [handler]
   (fn [{:keys [op transport] :as msg}]
-    (let [record? (not (contains? #{false 0 "false"} (::record? msg)))
-          history-id (when (and record? (#{"eval" "load-file"} op))
+    (let [history-id (when (#{"eval" "load-file"} op)
                        (observe #(history/begin! msg)))]
       (if-not history-id
         (handler msg)

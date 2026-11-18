@@ -135,24 +135,19 @@
         (is (= ["\"last-result\""] (vec (keep :value responses))))
         (is (= (subs code 0 16) (:input recorded)))
         (is (<= (count (:output recorded)) 16))
-        (is (str/includes? (:output recorded) "last-result"))
-        (is (:input-truncated? recorded))
-        (is (:output-truncated? recorded))))))
+        (is (str/includes? (:output recorded) "last-result"))))))
 
 
-(deftest completion-and-explicitly-suppressed-evals-do-not-enter-history
+(deftest non-evaluation-operations-do-not-enter-history
   (with-server
     (fn [client session _]
       (request client session {:op "describe"})
       (request client session {:op "lookup" :sym "map" :ns "clojure.core"})
       (request client session {:op "completions" :prefix "ma" :ns "clojure.core"})
-      (let [responses (request client session {:op "eval" :code "(+ 1 2)"
-                                               :co.multiply.remontoire.nrepl/record? 0})]
-        (is (= ["3"] (vec (keep :value responses)))))
       (is (empty? (:entries (api/nrepl-history)))))))
 
 
-(deftest paused-capture-does-not-affect-evaluation
+(deftest disabled-capture-does-not-affect-evaluation
   (api/nrepl-capture! {:enabled? false})
   (with-server
     (fn [client session _]
@@ -184,14 +179,6 @@
         (is (= ["3"] (vec (keep :value (request client session {:op "eval" :code "3"}))))))
       (with-redefs [history/response! (fn [& _] (throw (Exception. "capture failed")))]
         (is (= ["4"] (vec (keep :value (request client session {:op "eval" :code "4"})))))))))
-
-
-(deftest boolean-opt-out-works-before-wire-encoding
-  (let [called (atom false)
-        handler (recorder/wrap-history (fn [_] (reset! called true)))]
-    (handler {:op "eval" :code "1" :co.multiply.remontoire.nrepl/record? false})
-    (is @called)
-    (is (empty? (:entries (api/nrepl-history))))))
 
 
 (deftest middleware-does-not-realize-or-print-unexpected-response-objects

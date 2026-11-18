@@ -9,17 +9,15 @@
 
 
 (defonce ^:private state
-  (atom {:config defaults :entries (sorted-map) :next-id 0 :capture-after 0}))
+  (atom {:config defaults :entries (sorted-map) :next-id 0}))
 
 
 (defn- clip
-  "Return [text truncated?], keeping a prefix or tail of at most limit
-   UTF-16 code units. Like subs, this may split a surrogate pair."
+  "Keep a prefix or tail of at most limit UTF-16 code units."
   [^String text limit tail?]
   (let [length (String/.length text)
         kept (min length limit)]
-    [(if tail? (subs text (- length kept)) (subs text 0 kept))
-     (> length limit)]))
+    (if tail? (subs text (- length kept)) (subs text 0 kept))))
 
 
 (comment
@@ -39,15 +37,6 @@
   (clip "a𐐷b𐐷c" 0 true))
 
 
-(defn- trim-entry
-  [entry limit]
-  (let [[input input-cut?] (clip (:input entry) limit false)
-        [output output-cut?] (clip (:output entry) limit true)]
-    (cond-> (assoc entry :input input :output output)
-      input-cut? (assoc :input-truncated? true)
-      output-cut? (assoc :output-truncated? true))))
-
-
 (defn- newest
   [entries limit]
   (into (sorted-map) (take limit (rseq entries))))
@@ -62,12 +51,11 @@
       (when (:enabled? config)
         (let [id' (inc next-id)
               input (if (= op "load-file") file code)
-              [input cut?] (clip (if (string? input) input "") (:max-chars config) false)
+              input (clip (if (string? input) input "") (:max-chars config) false)
               entry {:id id' :op op :at (System/currentTimeMillis)
                      :session (when (string? session) session)
                      :request-id (when (string? id) id)
-                     :input input :output ""
-                     :input-truncated? cut? :output-truncated? false}]
+                     :input input :output ""}]
           (reset! state (assoc s :next-id id'
                           :entries (newest (assoc (:entries s) id' entry) (:max-entries config))))
           id')))))
@@ -77,21 +65,20 @@
   [entry k value limit]
   (if (and (string? value) (seq value))
     ;; Clip before concatenation: never copy a huge response just to trim it.
-    (let [[value value-cut?] (clip value limit true)
-          [output output-cut?] (clip (str (:output entry) "[" (name k) "] " value "\n") limit true)]
-      (cond-> (assoc entry :output output)
-        (or value-cut? output-cut?) (assoc :output-truncated? true)))
+    (let [value (clip value limit true)]
+      (assoc entry :output
+        (clip (str (:output entry) "[" (name k) "] " value "\n") limit true)))
     entry))
 
 
 (defn response!
   "Append printed value/out/err and exception strings to a retained snapshot.
-   Status-only responses are ignored. Evicted, cleared and pre-pause requests
-   cannot write back into history, even after recording is enabled again."
+   Status-only responses are ignored. Evicted or cleared requests cannot write
+   back into history, even after recording is enabled again."
   [id response]
   (locking state
-    (let [{:keys [config capture-after entries] :as s} @state]
-      (when (and (:enabled? config) (> id capture-after))
+    (let [{:keys [config entries] :as s} @state]
+      (when (:enabled? config)
         (when-let [entry (get entries id)]
           (let [entry (cond-> entry
                         (and (nil? (:session entry)) (string? (:session response)))
@@ -134,9 +121,8 @@
 
 (defn configure!
   "Merge :enabled?, :max-entries and :max-chars. Counts must be positive
-   integers. Smaller limits immediately evict oldest entries and trim text;
-   increasing limits cannot recover discarded content. Pausing freezes all
-   existing snapshots; resume captures only newly started evaluations."
+   integers. New limits apply on subsequent starts and output appends, leaving
+   untouched snapshots unchanged. Disabling recording clears history."
   [opts]
   (when-not (and (map? opts) (every? (set (keys defaults)) (keys opts)))
     (throw (ex-info "Unknown history configuration option" {})))
@@ -146,12 +132,8 @@
       (when-not (and (boolean? (:enabled? config))
                   (every? #(and (int? %) (pos? %)) (map config [:max-entries :max-chars])))
         (throw (ex-info "Invalid history limits" {})))
-      (let [entries (newest (:entries s) (:max-entries config))
-            s (cond-> (assoc s :config config
-                        :entries (into (sorted-map)
-                                   (map (fn [[id e]] [id (trim-entry e (:max-chars config))]))
-                                   entries))
-                (not (:enabled? config)) (assoc :capture-after (:next-id s)))]
+      (let [s (cond-> (assoc s :config config)
+                (not (:enabled? config)) (assoc :entries (sorted-map)))]
         (reset! state s)
         (status-of s)))))
 
