@@ -20,23 +20,6 @@
     (if tail? (subs text (- length kept)) (subs text 0 kept))))
 
 
-(comment
-  (subs  "ieeriani" 0 3)
-  (clip "abc" 2 false)
-  (clip "abc" 2 true)
-  (clip "abc" 5 false)
-  (clip "abc" 5 true)
-  (clip "abc" 0 false)
-  (clip "abc" 0 true)
-  (clip "a𐐷b𐐷c" 2 false)
-  (clip "a𐐷b𐐷c" 2 true)
-  (clip "a𐐷b𐐷c" 5 false)
-  (clip "a𐐷b𐐷c" 5 true)
-  (clip "a𐐷b𐐷c" 0 false)
-  (subs "a𐐷b𐐷c" 0 1)
-  (clip "a𐐷b𐐷c" 0 true))
-
-
 (defn- newest
   [entries limit]
   (into (sorted-map) (take limit (rseq entries))))

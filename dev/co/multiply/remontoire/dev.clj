@@ -10,10 +10,6 @@
 
 
 (comment
-  (require '[clojure.tools.namespace.repl :as tn])
-  (tn/refresh)
-  (r/nses "co.multiply.remontoire")
-  (r/outline 'co.multiply.remontoire.evaluate)
   (r/nrepl-capture! {:enabled? true}))
 
 
