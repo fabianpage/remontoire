@@ -10,8 +10,8 @@
   [f]
   (with-redefs-fn {#'history/state (atom @@#'history/state)}
     #(do (api/nrepl-capture! {:enabled? true})
-         (api/clear-nrepl-history!)
-         (f))))
+       (api/clear-nrepl-history!)
+       (f))))
 
 
 (use-fixtures :each isolated-history)
@@ -22,9 +22,16 @@
   (history/begin! {:op "eval" :session session :id (str (random-uuid)) :code input}))
 
 
-(defn- code-points
-  [s]
-  (String/.codePointCount s 0 (count s)))
+(deftest clip-keeps-bounded-prefixes-and-tails
+  (doseq [[text limit prefix tail cut?]
+          [["" 3 "" "" false]
+           ["abc" 0 "" "" true]
+           ["abc" 2 "ab" "bc" true]
+           ["abc" 3 "abc" "abc" false]
+           ["abc" 5 "abc" "abc" false]
+           ["😀" 1 "\uD83D" "\uDE00" true]]]
+    (is (= [prefix cut?] (#'history/clip text limit false)))
+    (is (= [tail cut?] (#'history/clip text limit true)))))
 
 
 (deftest defaults-and-explicit-enablement
@@ -47,7 +54,7 @@
     (is (every? #(not-any? (set (keys %)) [:input :output :events :status])
           (:entries (api/nrepl-history))))
     (is (= {:input "(+ 1 2)" :session "editor-a" :op "eval"}
-          (select-keys (api/nrepl-transcript a) [:input :session :op])))
+           (select-keys (api/nrepl-transcript a) [:input :session :op])))
     (is (int? (:at (api/nrepl-transcript a))))
     (is (string? (:request-id (api/nrepl-transcript a))))
     (let [output (:output (api/nrepl-transcript a))]
@@ -65,36 +72,36 @@
     (history/response! oldest {:out "still running"})
     (let [newest (begin "another-editor" "sixth")]
       (is (= (vec (reverse (conj (subvec ids 1) newest)))
-            (mapv :id (:entries (api/nrepl-history)))))
+             (mapv :id (:entries (api/nrepl-history)))))
       (is (:missing (api/nrepl-transcript oldest)))
       (history/response! oldest {:value "late"})
       (is (:missing (api/nrepl-transcript oldest)))
       (is (= 5 (:entries (api/nrepl-capture!)))))))
 
 
-(deftest input-prefix-and-output-tail-have-independent-code-point-limits
+(deftest input-prefix-and-output-tail-have-independent-utf16-limits
   (api/nrepl-capture! {:max-chars 10})
   (let [id (begin "a" (str (apply str (repeat 10 "😀")) "discarded"))]
     (history/response! id {:out (apply str (repeat 100 "x"))})
     (history/response! id {:err "終😀"})
     (let [{:keys [input output input-truncated? output-truncated?]} (api/nrepl-transcript id)]
-      (is (= (apply str (repeat 10 "😀")) input))
-      (is (= 10 (code-points input)))
-      (is (= 10 (code-points output)))
+      (is (= (apply str (repeat 5 "😀")) input))
+      (is (= 10 (count input)))
+      (is (= 10 (count output)))
       (is (str/includes? output "終😀"))
       (is (not (str/includes? output "x")))
       (is input-truncated?)
       (is output-truncated?))))
 
 
-(deftest exact-input-limit-and-smallest-limit-preserve-surrogate-pairs
+(deftest exact-input-limit-and-smallest-limit
   (api/nrepl-capture! {:max-chars 1})
-  (let [id (begin "a" "😀")]
-    (is (= "😀" (:input (api/nrepl-transcript id))))
+  (let [id (begin "a" "x")]
+    (is (= "x" (:input (api/nrepl-transcript id))))
     (is (false? (:input-truncated? (api/nrepl-transcript id))))
     (is (false? (:output-truncated? (api/nrepl-transcript id)))))
   (let [id (begin "a" "😀x")]
-    (is (= "😀" (:input (api/nrepl-transcript id))))
+    (is (= "\uD83D" (:input (api/nrepl-transcript id))))
     (is (:input-truncated? (api/nrepl-transcript id)))))
 
 
@@ -102,9 +109,9 @@
   (api/nrepl-capture! {:max-chars 32})
   (let [id (begin "a" "code")]
     (history/response! id {:out (apply str (repeat 100000 "😀"))})
-    (is (= 32 (code-points (:output (api/nrepl-transcript id)))))
+    (is (= 32 (count (:output (api/nrepl-transcript id)))))
     (dotimes [_ 2000] (history/response! id {:out "x"}))
-    (is (= 32 (code-points (:output (api/nrepl-transcript id)))))
+    (is (= 32 (count (:output (api/nrepl-transcript id)))))
     (is (:output-truncated? (api/nrepl-transcript id)))
     (is (not (contains? (api/nrepl-transcript id) :events)))))
 
@@ -145,8 +152,8 @@
     (is (:missing (api/nrepl-transcript a)))
     (is (= [c b] (mapv :id (:entries (api/nrepl-history)))))
     (is (= "abcd" (:input (api/nrepl-transcript b))))
-    (is (= "😀😀😀😀" (:input (api/nrepl-transcript c))))
-    (is (= 4 (code-points (:output (api/nrepl-transcript b)))))
+    (is (= "😀😀" (:input (api/nrepl-transcript c))))
+    (is (= 4 (count (:output (api/nrepl-transcript b)))))
     (is (str/includes? (:output (api/nrepl-transcript b)) "789"))
     (is (:input-truncated? (api/nrepl-transcript b)))
     (is (:output-truncated? (api/nrepl-transcript b)))
@@ -162,9 +169,9 @@
   (let [id (begin "a" "keep me")
         before (api/nrepl-history)]
     (doseq [opts [{:enabled? :yes} {:max-entries 0} {:max-chars 0}
-                 {:max-chars -1} {:max-entries 1.5} {:max-chars nil}
-                 {:enabled? false :max-entries 0} {:typo 10}
-                 {:entry-bytes 1024} {:total-bytes 4096} nil]]
+                  {:max-chars -1} {:max-entries 1.5} {:max-chars nil}
+                  {:enabled? false :max-entries 0} {:typo 10}
+                  {:entry-bytes 1024} {:total-bytes 4096} nil]]
       (is (thrown? clojure.lang.ExceptionInfo (api/nrepl-capture! opts)))
       (is (= before (api/nrepl-history))))
     (history/response! id {:out "still recording"})

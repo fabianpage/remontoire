@@ -13,17 +13,30 @@
 
 
 (defn- clip
-  "Return [text truncated?], keeping a code-point prefix or tail. Walk at most
-   limit code points, even for huge inputs; never split a surrogate pair."
+  "Return [text truncated?], keeping a prefix or tail of at most limit
+   UTF-16 code units. Like subs, this may split a surrogate pair."
   [^String text limit tail?]
   (let [length (String/.length text)
-        end (if tail? 0 length)]
-    (loop [i (if tail? length 0) n 0]
-      (if (or (= i end) (= n limit))
-        [(if tail? (subs text i) (subs text 0 i)) (not= i end)]
-        (let [cp (if tail? (String/.codePointBefore text i) (String/.codePointAt text i))
-              width (Character/charCount cp)]
-          (recur (if tail? (- i width) (+ i width)) (inc n)))))))
+        kept (min length limit)]
+    [(if tail? (subs text (- length kept)) (subs text 0 kept))
+     (> length limit)]))
+
+
+(comment
+  (subs  "ieeriani" 0 3)
+  (clip "abc" 2 false)
+  (clip "abc" 2 true)
+  (clip "abc" 5 false)
+  (clip "abc" 5 true)
+  (clip "abc" 0 false)
+  (clip "abc" 0 true)
+  (clip "a𐐷b𐐷c" 2 false)
+  (clip "a𐐷b𐐷c" 2 true)
+  (clip "a𐐷b𐐷c" 5 false)
+  (clip "a𐐷b𐐷c" 5 true)
+  (clip "a𐐷b𐐷c" 0 false)
+  (subs "a𐐷b𐐷c" 0 1)
+  (clip "a𐐷b𐐷c" 0 true))
 
 
 (defn- trim-entry
@@ -56,7 +69,7 @@
                      :input input :output ""
                      :input-truncated? cut? :output-truncated? false}]
           (reset! state (assoc s :next-id id'
-                         :entries (newest (assoc (:entries s) id' entry) (:max-entries config))))
+                          :entries (newest (assoc (:entries s) id' entry) (:max-entries config))))
           id')))))
 
 
@@ -95,8 +108,8 @@
 
 
 (defn status
-  "Capture settings and retained entry count. Character limits count Unicode
-   code points, independently for input and labeled output; not bytes or tokens."
+  "Capture settings and retained entry count. Character limits count UTF-16
+   code units, independently for input and labeled output; not bytes or tokens."
   []
   (status-of @state))
 
@@ -131,7 +144,7 @@
     (let [s @state
           config (merge (:config s) opts)]
       (when-not (and (boolean? (:enabled? config))
-                    (every? #(and (int? %) (pos? %)) (map config [:max-entries :max-chars])))
+                  (every? #(and (int? %) (pos? %)) (map config [:max-entries :max-chars])))
         (throw (ex-info "Invalid history limits" {})))
       (let [entries (newest (:entries s) (:max-entries config))
             s (cond-> (assoc s :config config

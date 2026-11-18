@@ -17,12 +17,12 @@
 (defn- with-server
   [f]
   (with-open [server (server/start-server :port 0 :bind "127.0.0.1"
-                      :handler (server/default-handler #'recorder/wrap-history))
+                       :handler (server/default-handler #'recorder/wrap-history))
               connection (nrepl/connect :port (:port server))]
     (let [client (nrepl/client connection 5000)
           session (:new-session (first (doall (nrepl/message client {:op "clone"}))))]
       (try (f client session connection)
-           (finally (doall (nrepl/message client {:op "close" :session session})))))))
+        (finally (doall (nrepl/message client {:op "close" :session session})))))))
 
 
 (defn- request
@@ -200,7 +200,9 @@
         sent (atom nil)
         wire (reify transport/Transport
                (recv [_] :recv)
+
                (recv [_ timeout] timeout)
+
                (send [this response] (reset! sent response) this))
         handler (recorder/wrap-history
                   (fn [{:keys [transport]}]
@@ -218,14 +220,16 @@
         handler (recorder/wrap-history (fn [_] (throw failure)))]
     (is (identical? failure
           (try (handler {:op "eval" :code "1"})
-               (catch Exception e e)))))
+            (catch Exception e e)))))
   (let [failure (Exception. "transport failure")
         wire (reify transport/Transport
                (recv [_] nil)
+
                (recv [_ _] nil)
+
                (send [_ _] (throw failure)))
         handler (recorder/wrap-history
                   (fn [{:keys [transport]}] (transport/send transport {:value "1"})))]
     (is (identical? failure
           (try (handler {:op "eval" :code "1" :transport wire})
-               (catch Exception e e))))))
+            (catch Exception e e))))))

@@ -203,8 +203,8 @@ does not start MCP or enable recording, and commands run before recording began 
 
 Now ask your agent what you last ran or why it failed. It can use `(__r/nrepl-history)` to list recent evaluations
 and `(__r/nrepl-transcript id)` to read one. History is kept in memory only. By default it keeps the **five most
-recently started evaluations across the JVM**, including running ones, with independent limits of **10,000 Unicode
-code points** for code and output. These are characters, not UTF-8 bytes or model tokens.
+recently started evaluations across the JVM**, including running ones, with independent limits of **10000 UTF-16
+codepoints** for code and output.
 
 Configure both limits with:
 

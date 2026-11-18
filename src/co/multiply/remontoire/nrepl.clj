@@ -37,8 +37,11 @@
           (assoc msg :transport
             (reify transport/Transport
               (recv [_] (transport/recv transport))
+
               (recv [_ timeout] (transport/recv transport timeout))
-              (send [this response]
+
+              (send
+                [this response]
                 (observe #(history/response! history-id response))
                 (transport/send transport response)
                 this))))))))

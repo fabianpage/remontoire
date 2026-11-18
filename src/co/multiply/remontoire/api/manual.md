@@ -118,8 +118,9 @@ Only JVM Clojure `eval` and `load-file` requests become entries. Other operation
 evals may still appear. Unattributed background output is outside this history; capture failures do not break nREPL.
 
 Defaults are `{:enabled? false :max-entries 5 :max-chars 10000}`. The count is global across the JVM, ordered by start,
-including running evaluations. The character limit counts Unicode code points independently for input and output,
-not UTF-8 bytes or model tokens. Keep the beginning of code and the end of labeled output; labels count toward the
+including running evaluations. The character limit counts UTF-16 code units independently for input and output,
+not UTF-8 bytes or model tokens. Truncation may split a surrogate pair.
+Keep the beginning of code and the end of labeled output; labels count toward the
 limit and the tail can start mid-line or mid-label. Smaller limits immediately trim/evict existing snapshots; larger
 limits cannot restore content. Reads do not refresh retention. Writers serialize bounded text updates rather than
 drop captures on contention, so recording can briefly delay an nREPL response. This is diagnostic context, not an audit

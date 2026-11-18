@@ -169,8 +169,9 @@
    map, merge :enabled? (default false), :max-entries (5), :max-chars (10000).
    Requires `co.multiply.remontoire.nrepl/wrap-history` in the nREPL stack.
 
-   :max-chars counts Unicode code points, independently for input and output,
-   not UTF-8 bytes or model tokens. Keep the beginning of code and the end of
+   :max-chars counts UTF-16 code units, independently for input and output,
+   not UTF-8 bytes or model tokens. Truncation may split a surrogate pair.
+   Keep the beginning of code and the end of
    labeled output. Smaller limits immediately trim/evict existing snapshots;
    increasing limits cannot recover discarded content. Reads do not pin entries.
 
